@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { BUDGET } from "./format";
 import {
   clearLedger,
   generateId,
@@ -12,7 +13,12 @@ import {
   type LedgerPeriod,
   type Purchase,
 } from "@/storage/ledger-storage";
-import { ensureCurrentPeriod, getPeriodById, periodContainsDate } from "./periods";
+import {
+  completeActivePeriod,
+  ensureActivePeriod,
+  getActivePeriod,
+  getPeriodById,
+} from "./periods";
 
 export interface NewPurchaseInput {
   title: string;
@@ -42,13 +48,15 @@ function addPurchaseToPeriod(period: LedgerPeriod, purchase: Purchase): LedgerPe
 
 /**
  * Holds the ledger state as a view over storage: every mutation is persisted
- * to localStorage synchronously before state updates are exposed. The current
- * period is rolled over automatically on load, on focus and every minute.
+ * to localStorage synchronously before state updates are exposed. Periods are
+ * fully manual — nothing rolls over automatically; the active period simply
+ * continues until the user completes it in Settings.
  */
 export function useLedger() {
   const [data, setData] = useState<LedgerData | null>(null);
   const [storageError, setStorageError] = useState<string | null>(null);
   const dataRef = useRef<LedgerData | null>(null);
+  const lastCompletionAtRef = useRef(0);
 
   const update = useCallback((updater: (data: LedgerData) => LedgerData) => {
     const current = dataRef.current;
@@ -65,46 +73,26 @@ export function useLedger() {
     }
   }, []);
 
-  // Initial load: read storage, roll the period over if the date changed.
+  // Initial load: make sure exactly one active period exists (creates the
+  // first one on a fresh start; a no-op while an active period is running).
   useEffect(() => {
     const loaded = loadLedger();
-    const { data: withCurrent, created } = ensureCurrentPeriod(loaded);
+    const { data: withActive, created } = ensureActivePeriod(loaded);
     if (created) {
       try {
-        saveLedger(withCurrent);
+        saveLedger(withActive);
       } catch {
         /* surfaced on next mutation */
       }
     }
-    dataRef.current = withCurrent;
+    dataRef.current = withActive;
     // eslint-disable-next-line react-hooks/set-state-in-effect -- hydrating state from localStorage on mount
-    setData(withCurrent);
-
-    // Re-check the period when the app regains focus or the day flips.
-    const checkRollover = () => {
-      const current = dataRef.current;
-      if (!current) return;
-      const { data: next, created: rolled } = ensureCurrentPeriod(current);
-      if (rolled) update(() => next);
-    };
-    const interval = window.setInterval(checkRollover, 60_000);
-    window.addEventListener("focus", checkRollover);
-    document.addEventListener("visibilitychange", checkRollover);
-    return () => {
-      window.clearInterval(interval);
-      window.removeEventListener("focus", checkRollover);
-      document.removeEventListener("visibilitychange", checkRollover);
-    };
-  }, [update]);
+    setData(withActive);
+  }, []);
 
   const getCurrentPeriod = useCallback((): LedgerPeriod | null => {
     if (!data) return null;
-    const now = new Date();
-    return (
-      data.periods.find((p) => periodContainsDate(p, now)) ??
-      // Fallback for a just-created period not yet in state.
-      data.periods[0] ?? null
-    );
+    return getActivePeriod(data) ?? null;
   }, [data]);
 
   const addPurchase = useCallback(
@@ -122,24 +110,30 @@ export function useLedger() {
     [getCurrentPeriod, update]
   );
 
+  // Completed periods are immutable snapshots — only the active period
+  // accepts purchase mutations.
   const editPurchase = useCallback(
     (periodId: string, purchaseId: string, input: NewPurchaseInput) => {
-      update((current) => ({
-        ...current,
-        periods: current.periods.map((p) =>
-          p.id === periodId
-            ? {
-                ...p,
-                purchases: p.purchases.map((purchase) =>
-                  purchase.id === purchaseId
-                    ? // createdAt stays untouched on edit.
-                      { ...purchase, title: input.title, amount: input.amount }
-                    : purchase
-                ),
-              }
-            : p
-        ),
-      }));
+      update((current) => {
+        const target = getPeriodById(current, periodId);
+        if (!target || target.status !== "active") return current;
+        return {
+          ...current,
+          periods: current.periods.map((p) =>
+            p.id === periodId
+              ? {
+                  ...p,
+                  purchases: p.purchases.map((purchase) =>
+                    purchase.id === purchaseId
+                      ? // createdAt stays untouched on edit.
+                        { ...purchase, title: input.title, amount: input.amount }
+                      : purchase
+                  ),
+                }
+              : p
+          ),
+        };
+      });
     },
     [update]
   );
@@ -148,19 +142,23 @@ export function useLedger() {
     (periodId: string, purchaseId: string) => {
       let removed: Purchase | undefined;
       let removedIndex = 0;
-      update((current) => ({
-        ...current,
-        periods: current.periods.map((p) => {
-          if (p.id !== periodId) return p;
-          removedIndex = p.purchases.findIndex((purchase) => purchase.id === purchaseId);
-          if (removedIndex === -1) return p;
-          removed = p.purchases[removedIndex];
-          return {
-            ...p,
-            purchases: p.purchases.filter((purchase) => purchase.id !== purchaseId),
-          };
-        }),
-      }));
+      update((current) => {
+        const target = getPeriodById(current, periodId);
+        if (!target || target.status !== "active") return current;
+        return {
+          ...current,
+          periods: current.periods.map((p) => {
+            if (p.id !== periodId) return p;
+            removedIndex = p.purchases.findIndex((purchase) => purchase.id === purchaseId);
+            if (removedIndex === -1) return p;
+            removed = p.purchases[removedIndex];
+            return {
+              ...p,
+              purchases: p.purchases.filter((purchase) => purchase.id !== purchaseId),
+            };
+          }),
+        };
+      });
       return removed ? { periodId, purchase: removed, index: removedIndex } : null;
     },
     [update]
@@ -170,7 +168,7 @@ export function useLedger() {
     (periodId: string, purchase: Purchase, index: number) => {
       update((current) => {
         const target = getPeriodById(current, periodId);
-        if (!target) return current;
+        if (!target || target.status !== "active") return current;
         const purchases = [...target.purchases];
         purchases.splice(Math.min(index, purchases.length), 0, purchase);
         return {
@@ -182,20 +180,49 @@ export function useLedger() {
     [update]
   );
 
+  /** Updates the "budget for new period" setting; never touches existing periods. */
+  const setNextBudget = useCallback(
+    (budget: number) => {
+      update((current) => ({ ...current, nextBudget: budget }));
+    },
+    [update]
+  );
+
+  /**
+   * Completes the active period and starts a new one (today, with the
+   * "budget for new period" setting). Idempotent against fast repeated
+   * presses: without an active period it is a no-op, and calls within
+   * 500 ms of a completion are ignored, so a double click can never
+   * complete two periods.
+   */
+  const completeCurrentPeriod = useCallback((): LedgerPeriod | null => {
+    if (Date.now() - lastCompletionAtRef.current < 500) return null;
+    let completedPeriod: LedgerPeriod | null = null;
+    update((current) => {
+      const result = completeActivePeriod(current);
+      if (result.completed) {
+        completedPeriod = result.previous ?? null;
+        lastCompletionAtRef.current = Date.now();
+      }
+      return result.data;
+    });
+    return completedPeriod;
+  }, [update]);
+
   const importData = useCallback(
     (json: string) => {
       const imported = parseImport(json);
-      const { data: withCurrent } = ensureCurrentPeriod(imported);
-      update(() => withCurrent);
+      const { data: withActive } = ensureActivePeriod(imported);
+      update(() => withActive);
     },
     [update]
   );
 
   const clearAllData = useCallback(() => {
     clearLedger();
-    const fresh: LedgerData = { version: SCHEMA_VERSION, periods: [] };
-    const { data: withCurrent } = ensureCurrentPeriod(fresh);
-    update(() => withCurrent);
+    const fresh: LedgerData = { version: SCHEMA_VERSION, nextBudget: BUDGET, periods: [] };
+    const { data: withActive } = ensureActivePeriod(fresh);
+    update(() => withActive);
   }, [update]);
 
   return {
@@ -208,6 +235,8 @@ export function useLedger() {
     editPurchase,
     deletePurchase,
     undoDelete,
+    setNextBudget,
+    completeCurrentPeriod,
     importData,
     clearAllData,
   };

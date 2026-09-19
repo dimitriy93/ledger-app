@@ -6,6 +6,8 @@ interface ConfirmDialogProps {
   open: boolean;
   title: string;
   description?: string;
+  /** Rich dialog body (rendered instead of `description` when set). */
+  children?: React.ReactNode;
   confirmLabel: string;
   cancelLabel?: string;
   destructive?: boolean;
@@ -17,6 +19,7 @@ export default function ConfirmDialog({
   open,
   title,
   description,
+  children,
   confirmLabel,
   cancelLabel = "Отмена",
   destructive = false,
@@ -50,7 +53,9 @@ export default function ConfirmDialog({
       />
       <div className="relative w-full max-w-sm rounded-2xl border border-line bg-surface p-6 shadow-2xl shadow-black/50 animate-fade-up">
         <h2 className="text-lg font-semibold">{title}</h2>
-        {description ? (
+        {children ? (
+          children
+        ) : description ? (
           <p className="mt-2 text-sm leading-relaxed text-muted">{description}</p>
         ) : null}
         <div className="mt-6 flex gap-3">

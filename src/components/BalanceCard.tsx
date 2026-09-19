@@ -1,8 +1,8 @@
 "use client";
 
 import AnimatedNumber from "./AnimatedNumber";
-import { formatMoney, formatPeriodRange } from "@/lib/format";
-import { sumPurchases, type LedgerPeriod } from "@/lib/periods";
+import { formatDayCount, formatMoney, formatPeriodStart } from "@/lib/format";
+import { getDayNumber, sumPurchases, type LedgerPeriod } from "@/lib/periods";
 
 interface BalanceCardProps {
   period: LedgerPeriod;
@@ -36,7 +36,7 @@ export default function BalanceCard({ period }: BalanceCardProps) {
       </div>
 
       <p className="mt-4 text-xs font-medium tracking-wide text-muted">
-        {formatPeriodRange(period.startDate, period.endDate)}
+        Начало с {formatPeriodStart(period.startDate)} · {formatDayCount(getDayNumber(period))}
       </p>
 
       <div

@@ -1,5 +1,5 @@
 export const BUDGET = 15000;
-export const APP_VERSION = "1.0.0";
+export const APP_VERSION = "1.1.0";
 
 const moneyFormatter = new Intl.NumberFormat("ru-RU", {
   maximumFractionDigits: 0,
@@ -59,29 +59,52 @@ export function formatPurchaseDate(iso: string, now: Date = new Date()): string 
   return thisYear ? `${dayMonth}, ${time}` : `${dayMonth} ${date.getFullYear()}, ${time}`;
 }
 
-/** "05 сентября — 19 сентября"; the year is shown only when it differs from `now`. */
-export function formatPeriodRange(startISO: string, endISO: string, now: Date = new Date()): string {
-  const start = new Date(startISO);
-  const end = new Date(endISO);
-  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return "";
-
-  const sameYear = start.getFullYear() === end.getFullYear();
-  const startStr = `${String(start.getDate()).padStart(2, "0")} ${MONTHS[start.getMonth()]}`;
-  const endStr = `${String(end.getDate()).padStart(2, "0")} ${MONTHS[end.getMonth()]}`;
-  const yearSuffix =
-    start.getFullYear() === now.getFullYear() && sameYear ? "" : ` ${start.getFullYear()}`;
-
-  if (sameYear) return `${startStr} — ${endStr}${yearSuffix}`;
-  return `${startStr} ${start.getFullYear()} — ${endStr} ${end.getFullYear()}`;
+/**
+ * Parses "YYYY-MM-DD" as a local calendar date. `new Date("YYYY-MM-DD")`
+ * parses as UTC midnight, which shifts the day in non-UTC timezones.
+ */
+export function parseISODate(iso: string): Date | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
+  if (!match) return null;
+  const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  return Number.isNaN(date.getTime()) ? null : date;
 }
 
-/** "05.09 — 19.09" (compact, for history lists) */
-export function formatPeriodRangeShort(startISO: string, endISO: string): string {
-  const start = new Date(startISO);
-  const end = new Date(endISO);
-  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return "";
+function formatDateWithMonth(date: Date, now: Date): string {
+  const dayMonth = `${String(date.getDate()).padStart(2, "0")} ${MONTHS[date.getMonth()]}`;
+  const yearSuffix = date.getFullYear() === now.getFullYear() ? "" : ` ${date.getFullYear()}`;
+  return `${dayMonth}${yearSuffix}`;
+}
+
+/** "с 18 сентября"; the year is shown only when it differs from `now`. */
+export function formatPeriodStart(startISO: string, now: Date = new Date()): string {
+  const start = parseISODate(startISO);
+  if (!start) return "";
+  return formatDateWithMonth(start, now);
+}
+
+/** Russian plural for whole days: 1 день / 2 дня / 5 дней / 21 день. */
+export function formatDayCount(days: number): string {
+  const n = Number.isFinite(days) ? Math.max(0, Math.round(days)) : 0;
+  const mod100 = n % 100;
+  const mod10 = n % 10;
+  if (mod100 >= 11 && mod100 <= 14) return `${n} дней`;
+  if (mod10 === 1) return `${n} день`;
+  if (mod10 >= 2 && mod10 <= 4) return `${n} дня`;
+  return `${n} дней`;
+}
+
+/**
+ * "18.09 — 24.09" (compact, for history lists). A period that started and
+ * ended on the same day is shown as a single date: "18.09".
+ */
+export function formatPeriodRangeShort(startISO: string, endISO: string | null): string {
+  const start = parseISODate(startISO);
+  const end = endISO === null ? null : parseISODate(endISO);
+  if (!start || !end) return "";
 
   const fmt = (d: Date) =>
     `${String(d.getDate()).padStart(2, "0")}.${String(d.getMonth() + 1).padStart(2, "0")}`;
+  if (start.getTime() === end.getTime()) return fmt(start);
   return `${fmt(start)} — ${fmt(end)}`;
 }

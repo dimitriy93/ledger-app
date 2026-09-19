@@ -1,89 +1,115 @@
-import { BUDGET } from "./format";
-import type { LedgerPeriod } from "../storage/ledger-storage";
+import { BUDGET } from "./format.ts";
+import { generateId, type LedgerData, type LedgerPeriod } from "../storage/ledger-storage.ts";
 
-export type { LedgerPeriod };
+export type { LedgerData, LedgerPeriod };
 
-/**
- * Budget periods run from the 5th to the 19th (inclusive) and from the 20th
- * to the 4th of the next month (inclusive). No assumptions about month
- * lengths are made — Date arithmetic handles month/year/leap boundaries.
- */
-export function getPeriodBoundsFor(date: Date): { start: Date; end: Date } {
-  const day = date.getDate();
-  const y = date.getFullYear();
-  const m = date.getMonth();
-
-  if (day >= 5 && day <= 19) {
-    return {
-      start: new Date(y, m, 5),
-      end: new Date(y, m, 19),
-    };
-  }
-  if (day >= 20) {
-    return {
-      start: new Date(y, m, 20),
-      end: new Date(y, m + 1, 4),
-    };
-  }
-  // day 1..4 -> period started on the 20th of the previous month
-  return {
-    start: new Date(y, m - 1, 20),
-    end: new Date(y, m, 4),
-  };
-}
-
-function toISODate(date: Date): string {
+/** "YYYY-MM-DD" for a local calendar date. */
+export function toISODate(date: Date): string {
   const y = date.getFullYear();
   const m = String(date.getMonth() + 1).padStart(2, "0");
   const d = String(date.getDate()).padStart(2, "0");
   return `${y}-${m}-${d}`;
 }
 
-export function periodIdFor(date: Date): string {
-  return toISODate(getPeriodBoundsFor(date).start);
+/** Parses "YYYY-MM-DD" as a local date (new Date("YYYY-MM-DD") parses as UTC). */
+export function fromISODate(iso: string): Date | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
+  if (!match) return null;
+  const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  return Number.isNaN(date.getTime()) ? null : date;
 }
 
-export function createPeriodFor(date: Date): LedgerPeriod {
-  const { start, end } = getPeriodBoundsFor(date);
+/** Whole calendar days from `fromISO` (inclusive) to `date` (inclusive). */
+function calendarDaysFrom(fromISO: string, date: Date): number | null {
+  const start = fromISODate(fromISO);
+  if (!start) return null;
+  const dayMs = 86_400_000;
+  const startDay = new Date(start.getFullYear(), start.getMonth(), start.getDate()).getTime();
+  const todayDay = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+  // Rounding keeps this exact across DST shifts; both operands are local midnights.
+  return Math.round((todayDay - startDay) / dayMs);
+}
+
+/**
+ * 1-based day number of an ongoing period: the start date itself is day 1.
+ * Calendar-date based, so DST transitions and month/year/leap boundaries
+ * cannot skew the count.
+ */
+export function getDayNumber(period: LedgerPeriod, date: Date = new Date()): number {
+  const days = calendarDaysFrom(period.startDate, date);
+  return days === null || days < 0 ? 1 : days + 1;
+}
+
+export function createPeriod(startDate: string, budget: number): LedgerPeriod {
   return {
-    id: toISODate(start),
-    startDate: toISODate(start),
-    endDate: toISODate(end),
-    budget: BUDGET,
+    id: generateId(),
+    startDate,
+    endDate: null,
+    budget,
+    status: "active",
     purchases: [],
   };
 }
 
-/** True when `date` falls within [startDate, endDate] of the period. */
-export function periodContainsDate(period: LedgerPeriod, date: Date): boolean {
-  const start = new Date(period.startDate);
-  const end = new Date(period.endDate);
-  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return false;
-  const dayStart = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
-  const rangeStart = new Date(start.getFullYear(), start.getMonth(), start.getDate()).getTime();
-  const rangeEnd = new Date(end.getFullYear(), end.getMonth(), end.getDate()).getTime();
-  return dayStart >= rangeStart && dayStart <= rangeEnd;
+export function getActivePeriod(data: LedgerData): LedgerPeriod | undefined {
+  return data.periods.find((p) => p.status === "active");
 }
 
 /**
- * Returns the data with a period covering `date`, creating it (as a fresh
- * 15 000 ₽ budget) when missing. Pure — does not touch storage.
+ * Returns the data with an active period, creating one (today, with the
+ * "budget for new period" setting) when none exists. There is never more
+ * than one active period. Pure — does not touch storage.
  */
-export function ensureCurrentPeriod<T extends { periods: LedgerPeriod[] }>(
-  data: T,
-  date: Date = new Date()
-): { data: T; created: boolean } {
-  const existing = data.periods.find((p) => periodContainsDate(p, date));
-  if (existing) return { data, created: false };
+export function ensureActivePeriod(data: LedgerData, date: Date = new Date()): {
+  data: LedgerData;
+  created: boolean;
+} {
+  if (getActivePeriod(data)) return { data, created: false };
 
-  const period = createPeriodFor(date);
+  const budget = data.nextBudget >= 1 ? data.nextBudget : BUDGET;
+  const period = createPeriod(toISODate(date), budget);
   return {
     data: { ...data, periods: [period, ...data.periods] },
     created: true,
   };
 }
 
-export function getPeriodById(data: { periods: LedgerPeriod[] }, id: string): LedgerPeriod | undefined {
+export interface CompletionResult {
+  data: LedgerData;
+  /** false when there was no active period (the operation is idempotent). */
+  completed: boolean;
+  previous?: LedgerPeriod;
+}
+
+/**
+ * Completes the active period as of `date`: it becomes an immutable
+ * completed snapshot (endDate = date), and a new active period starts the
+ * same day with the current "budget for new period" setting. Calling it
+ * again without an active period changes nothing.
+ */
+export function completeActivePeriod(data: LedgerData, date: Date = new Date()): CompletionResult {
+  const active = getActivePeriod(data);
+  if (!active) return { data, completed: false };
+
+  const endDate = toISODate(date);
+  const previous: LedgerPeriod = {
+    ...active,
+    status: "completed",
+    endDate: endDate < active.startDate ? active.startDate : endDate,
+  };
+  const rest = data.periods.filter((p) => p.id !== active.id);
+
+  const budget = data.nextBudget >= 1 ? data.nextBudget : BUDGET;
+  const next = createPeriod(endDate, budget);
+
+  return {
+    data: { ...data, periods: [next, previous, ...rest] },
+    completed: true,
+    previous,
+  };
+}
+
+export function getPeriodById(data: LedgerData, id: string): LedgerPeriod | undefined {
   return data.periods.find((p) => p.id === id);
 }
 

@@ -72,9 +72,14 @@ export default function LedgerApp() {
 
   const ready = ledger.ready;
   const currentPeriod = ledger.getCurrentPeriod();
+  // History is the immutable snapshot of completed periods.
   const pastPeriods = (ledger.data?.periods ?? []).filter(
-    (p) => !currentPeriod || p.id !== currentPeriod.id
+    (p) => p.status === "completed"
   );
+
+  const onNoticeMessage = useCallback((message: string) => {
+    setSnackbar({ message });
+  }, []);
 
   const handleDelete = useCallback(
     (purchase: Purchase) => {
@@ -136,7 +141,8 @@ export default function LedgerApp() {
           </div>
         ) : tab === "home" ? (
           <div className="space-y-6">
-            <BalanceCard period={currentPeriod} />
+            {/* Keyed by period id so completing a period animates the new one in. */}
+            <BalanceCard key={currentPeriod.id} period={currentPeriod} />
 
             <button
               type="button"
@@ -166,9 +172,18 @@ export default function LedgerApp() {
         ) : (
           <SettingsView
             data={ledger.data!}
+            currentPeriod={currentPeriod}
+            nextBudget={ledger.data!.nextBudget}
+            onBudgetChange={ledger.setNextBudget}
+            onCompletePeriod={() => {
+              const previous = ledger.completeCurrentPeriod();
+              if (previous) {
+                onNoticeMessage("Расчётный период завершён — начат новый");
+              }
+            }}
             onImport={ledger.importData}
             onClearAll={ledger.clearAllData}
-            onNotice={(message) => setSnackbar({ message })}
+            onNotice={onNoticeMessage}
           />
         )}
       </main>

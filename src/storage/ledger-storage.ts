@@ -7,8 +7,14 @@
  * future structural changes can run through `MIGRATIONS`.
  */
 
-export const SCHEMA_VERSION = 1;
+// The explicit .ts extension lets the pure domain/storage modules also run
+// under plain `node` for the unit tests (tsconfig has allowImportingTsExtensions).
+import { BUDGET } from "../lib/format.ts";
+
+export const SCHEMA_VERSION = 2;
 const STORAGE_KEY = "ledger.data.v1";
+
+export type PeriodStatus = "active" | "completed";
 
 export interface Purchase {
   id: string;
@@ -21,13 +27,17 @@ export interface Purchase {
 export interface LedgerPeriod {
   id: string;
   startDate: string; // YYYY-MM-DD inclusive
-  endDate: string; // YYYY-MM-DD inclusive
+  /** Completion date, or null while the period is active. */
+  endDate: string | null;
   budget: number;
+  status: PeriodStatus;
   purchases: Purchase[];
 }
 
 export interface LedgerData {
   version: number;
+  /** Budget applied to every newly created period; never touches existing ones. */
+  nextBudget: number;
   periods: LedgerPeriod[];
 }
 
@@ -37,9 +47,36 @@ export type MigrationResult =
 
 type Migration = (input: unknown) => unknown;
 
+/**
+ * v1 -> v2: budget periods were calendar-based (5th–19th, 20th–4th) with fixed
+ * endDate bounds. Now periods are manual: an active period has no endDate, a
+ * completed one is an immutable snapshot. The v1 period covering today carries
+ * the user's ongoing expenses, so it continues as the active period; all other
+ * periods become completed history. Nothing is deleted or re-created.
+ */
+function migrateV1ToV2(input: unknown): unknown {
+  if (!isRecord(input)) return input;
+  const todayISO = toISODate(new Date());
+  const rawPeriods = Array.isArray(input.periods) ? input.periods : [];
+
+  const periods = rawPeriods.map((raw) => {
+    if (!isRecord(raw)) return raw;
+    const start = typeof raw.startDate === "string" ? raw.startDate : "";
+    const end = typeof raw.endDate === "string" ? raw.endDate : "";
+    // ISO dates compare correctly as plain strings.
+    const isCurrent = start !== "" && start <= todayISO && (end === "" || todayISO <= end);
+    return {
+      ...raw,
+      status: isCurrent ? "active" : "completed",
+      endDate: isCurrent ? null : end || start,
+    };
+  });
+
+  return { ...input, version: 2, nextBudget: BUDGET, periods };
+}
+
 const MIGRATIONS: Record<number, Migration> = {
-  // Example for a future version 2:
-  // 2: (data) => ({ ...data as object, newField: defaultValue }),
+  1: migrateV1ToV2,
 };
 
 export class StorageError extends Error {}
@@ -59,6 +96,12 @@ function toPositiveInt(value: unknown): number {
   return Math.max(1, toSafeInt(value));
 }
 
+/** Positive integer budget with a fallback for missing/invalid values. */
+function toBudget(value: unknown, fallback: number): number {
+  const n = toSafeInt(value);
+  return n >= 1 ? n : fallback;
+}
+
 function toDateString(value: unknown, fallback: string): string {
   if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
   if (typeof value === "string") {
@@ -66,6 +109,13 @@ function toDateString(value: unknown, fallback: string): string {
     if (!Number.isNaN(d.getTime())) return d.toISOString().slice(0, 10);
   }
   return fallback;
+}
+
+function toISODate(date: Date): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
 }
 
 function sanitizePurchase(input: unknown): Purchase | null {
@@ -88,7 +138,13 @@ function sanitizePeriod(input: unknown, seenIds: Set<string>): LedgerPeriod | nu
   if (!isRecord(input)) return null;
   const startDate = toDateString(input.startDate, "");
   if (!startDate) return null;
-  const endDate = toDateString(input.endDate, startDate);
+
+  const status: PeriodStatus = input.status === "completed" ? "completed" : "active";
+  // An active period is open-ended; a completed one always knows when it ended.
+  let endDate =
+    status === "active" ? null : input.endDate === null ? null : toDateString(input.endDate, "");
+  if (status === "completed" && !endDate) endDate = startDate;
+  if (status === "completed" && endDate && endDate < startDate) endDate = startDate;
 
   const purchases: Purchase[] = [];
   const seenPurchaseIds = new Set<string>();
@@ -111,11 +167,16 @@ function sanitizePeriod(input: unknown, seenIds: Set<string>): LedgerPeriod | nu
     startDate,
     endDate,
     budget: toPositiveInt(input.budget),
+    status,
     purchases,
   };
 }
 
-/** Deep sanitization: never trusts stored/imported JSON. */
+/**
+ * Deep sanitization: never trusts stored/imported JSON. Guarantees the
+ * domain invariant that at most one period is active (the newest one;
+ * any others are demoted to completed history, never dropped).
+ */
 export function sanitizeLedgerData(input: unknown): LedgerData {
   const periods: LedgerPeriod[] = [];
   const seenIds = new Set<string>();
@@ -129,7 +190,26 @@ export function sanitizeLedgerData(input: unknown): LedgerData {
 
   // Newest period first (by start date, descending).
   periods.sort((a, b) => b.startDate.localeCompare(a.startDate));
-  return { version: SCHEMA_VERSION, periods };
+
+  const newestActiveIndex = periods.findIndex((p) => p.status === "active");
+  if (newestActiveIndex !== -1) {
+    for (let i = 0; i < periods.length; i++) {
+      const period = periods[i];
+      if (i !== newestActiveIndex && period.status === "active") {
+        periods[i] = {
+          ...period,
+          status: "completed",
+          endDate: period.endDate ?? period.startDate,
+        };
+      }
+    }
+  }
+
+  return {
+    version: SCHEMA_VERSION,
+    nextBudget: isRecord(input) ? toBudget(input.nextBudget, BUDGET) : BUDGET,
+    periods,
+  };
 }
 
 function migrate(input: unknown): MigrationResult {
@@ -170,16 +250,18 @@ export function generateId(): string {
 }
 
 export function loadLedger(): LedgerData {
-  if (typeof window === "undefined") return { version: SCHEMA_VERSION, periods: [] };
+  if (typeof window === "undefined") {
+    return { version: SCHEMA_VERSION, nextBudget: BUDGET, periods: [] };
+  }
 
   let raw: string | null = null;
   try {
     raw = window.localStorage.getItem(STORAGE_KEY);
   } catch {
     // Storage can be unavailable (private mode, disabled cookies) — start empty.
-    return { version: SCHEMA_VERSION, periods: [] };
+    return { version: SCHEMA_VERSION, nextBudget: BUDGET, periods: [] };
   }
-  if (!raw) return { version: SCHEMA_VERSION, periods: [] };
+  if (!raw) return { version: SCHEMA_VERSION, nextBudget: BUDGET, periods: [] };
 
   try {
     const parsed: unknown = JSON.parse(raw);
@@ -192,11 +274,11 @@ export function loadLedger(): LedgerData {
       } catch {
         /* ignore */
       }
-      return { version: SCHEMA_VERSION, periods: [] };
+      return { version: SCHEMA_VERSION, nextBudget: BUDGET, periods: [] };
     }
     return result.data;
   } catch {
-    return { version: SCHEMA_VERSION, periods: [] };
+    return { version: SCHEMA_VERSION, nextBudget: BUDGET, periods: [] };
   }
 }
 
@@ -226,10 +308,7 @@ export function serializeForExport(data: LedgerData): string {
 }
 
 export function backupFileName(now: Date = new Date()): string {
-  const y = now.getFullYear();
-  const m = String(now.getMonth() + 1).padStart(2, "0");
-  const d = String(now.getDate()).padStart(2, "0");
-  return `ledger-backup-${y}-${m}-${d}.json`;
+  return `ledger-backup-${toISODate(now)}.json`;
 }
 
 /** Parses and validates an imported JSON string. Throws StorageError on failure. */
