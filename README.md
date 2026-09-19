@@ -1,36 +1,79 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Ledger — персональный финансовый регистр
 
-## Getting Started
+PWA-приложение для персонального учёта расходов: фиксированный бюджет **15 000 ₽**
+на период, быстрый ввод покупок с главного экрана и постоянный контроль остатка.
+Полностью клиентское приложение — данные хранятся только в LocalStorage устройства.
 
-First, run the development server:
+## Бюджетные периоды
+
+- **5–19** и **20–4** число следующего месяца (включительно);
+- новый период начинается автоматически, предыдущий остаётся в истории;
+- корректно обрабатываются переходы месяца, года и високосный февраль.
+
+## Возможности
+
+- Добавление покупки с главного экрана: название + стоимость, без лишних шагов.
+- Редактирование и удаление покупок (удаление — с отменой через snackbar).
+- Живой баланс с плавной анимацией числа и индикатором расхода.
+- Корректный показ перерасхода (отрицательный баланс не блокирует ввод).
+- История периодов с деталями: бюджет, покупки, расходы, конечный остаток.
+- Экспорт / импорт JSON-бэкапов, очистка данных с подтверждением.
+- Версионированная схема данных (`version: 1`) с заделом под миграции.
+- Единый слой хранения (`src/storage/ledger-storage.ts`) — LocalStorage легко
+  заменить на другой бэкенд без изменения UI.
+- PWA: manifest, service worker с offline shell, иконки, standalone-режим на iOS.
+
+## Стек
+
+Next.js (static export) · React · TypeScript · Tailwind CSS · LocalStorage · GitHub Pages
+
+## Разработка
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm install
+npm run dev        # http://localhost:3000
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Сборка и деплой
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+npm run build      # static export в ./out
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Деплой на GitHub Pages выполняется автоматически (`GitHub Actions`):
+push в `main` → build → GitHub Pages. В CI basePath берётся из имени репозитория
+(`NEXT_PUBLIC_BASE_PATH=/<repo-name>`), поэтому приложение корректно работает
+по адресу `https://<user>.github.io/<repo-name>/`.
 
-## Learn More
+Для локальной проверки сборки с basePath:
 
-To learn more about Next.js, take a look at the following resources:
+```bash
+NEXT_PUBLIC_BASE_PATH=/ledger npm run build
+npx serve out
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Тесты
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```bash
+npx tsx src/lib/periods.test.ts   # календарь периодов
+npm run lint                      # ESLint
+npm run build                     # TypeScript + production build
+```
 
-## Deploy on Vercel
+## Структура
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```text
+src/
+  app/                 # layout, страница, глобальные стили
+  components/          # UI: баланс, форма, список, история, настройки
+  lib/
+    periods.ts         # календарь бюджетных периодов
+    format.ts          # деньги и даты (ru-RU)
+    useLedger.ts       # состояние с записью в хранилище на каждое изменение
+  storage/
+    ledger-storage.ts  # единственный слой доступа к LocalStorage
+public/
+  manifest.webmanifest, sw.js, icons/
+scripts/
+  generate-icons.mjs   # генерация PNG-иконок без зависимостей
+```
